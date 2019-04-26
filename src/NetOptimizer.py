@@ -137,31 +137,18 @@ class NetOptimizer(object):
     zeroIndices[4][:,None,0,] += tmpField
     zeroIndices[4][:,None,1,] += tmpField
     zeroIndices[4][:,None,2,] += tmpField 
-            
-  def optimizeNet(self, imgDataToWork, labelToWork, lastDefField = None, currDefFields = None, idx=None, itIdx=0):
-    # zero the parameter gradients
-    self.optimizer.zero_grad()
-     
-    defFields = self.net(imgDataToWork)
-      
-    addedField = lastDefField[:, :, idx[0]:idx[0]+defFields.shape[2], idx[1]:idx[1]+defFields.shape[3], idx[2]:idx[2]+defFields.shape[4]]+ defFields
-      
-    currDefFields[:, :, idx[0]:idx[0]+defFields.shape[2], idx[1]:idx[1]+defFields.shape[3], idx[2]:idx[2]+defFields.shape[4]] = addedField.detach()
 
-    cropStart0 = (imgDataToWork.shape[2]-defFields.shape[2])/2
-    cropStart1 = (imgDataToWork.shape[3]-defFields.shape[3])/2
-    cropStart2 = (imgDataToWork.shape[4]-defFields.shape[4])/2
-    imgDataToWork = imgDataToWork[:,:,cropStart0:cropStart0+defFields.shape[2], cropStart1:cropStart1+defFields.shape[3], cropStart2:cropStart2+defFields.shape[4]]
-
-    lossCalculator = lf.LossFunctions(imgDataToWork, addedField, currDefFields, self.spacing)
-     
-    boundaryLoss = 0.0
-    smoothnessLoss = 0.0
+  def getCycleSmoothnessCrossCorrLoss(self, imgDataToWork, currDefFields, addedField, defFields, idx, itIdx):
     
     smoothNessWeight = self.userOpts.smoothW[itIdx]
     crossCorrWeight = self.userOpts.ccW
     cyclicWeight = self.userOpts.cycleW
     crossCorrWeight,smoothNessWeight, cyclicWeight = self.normalizeWeights(crossCorrWeight, smoothNessWeight, cyclicWeight)
+    
+    lossCalculator = lf.LossFunctions(imgDataToWork, addedField, currDefFields, self.spacing)
+     
+    boundaryLoss = 0.0
+    smoothnessLoss = 0.0
     
     if self.userOpts.boundarySmoothnessW[itIdx] > 0.0:
       boundaryLoss = lossCalculator.smoothBoundary(idx, self.userOpts.device)
@@ -171,8 +158,7 @@ class NetOptimizer(object):
     else:
       smoothnessLoss = lossCalculator.smoothnessVecField(self.userOpts.device)
       
-    smoothnessDF = smoothnessLoss + boundaryLoss * self.userOpts.boundarySmoothnessW[itIdx]
-    
+    smoothnessDF = smoothnessLoss + boundaryLoss * self.userOpts.boundarySmoothnessW[itIdx]    
     
     imgDataDef = Utils.getImgDataDef(imgDataToWork.shape, self.userOpts.device)#torch.empty(imgDataToWork.shape, device=self.userOpts.device, requires_grad=False)#
     cycleImgData = Utils.getCycleImgData(defFields.shape, self.userOpts.device)#torch.empty(defFields.shape, device=self.userOpts.device)
@@ -189,20 +175,27 @@ class NetOptimizer(object):
     
     crossCorr = lossCalculator.normCrossCorr(imgDataDef)
     cycleLoss = lossCalculator.cycleLoss(cycleImgData, self.userOpts.device)
-    
     loss = crossCorrWeight * crossCorr + smoothNessWeight * smoothnessDF + self.userOpts.cycleW * cycleLoss
+    return loss
+            
+  def optimizeNet(self, imgDataToWork, labelToWork, idxField = None, currDefFields = None, idx=None, itIdx=0):
+    # zero the parameter gradients
+    self.optimizer.zero_grad()
+     
+    defFields = self.net(imgDataToWork)
+    subIdxField=idxField[:, :, idx[0]:idx[0]+imgDataToWork.shape[2], idx[1]:idx[1]+imgDataToWork.shape[3], idx[2]:idx[2]+imgDataToWork.shape[4]]
+    addedField = currDefFields[:, :, idx[0]:idx[0]+imgDataToWork.shape[2], idx[1]:idx[1]+imgDataToWork.shape[3], idx[2]:idx[2]+imgDataToWork.shape[4]] + defFields
     
-#     print('cc: %.5f smmothness: %.5f cycleLoss: %.5f' % (crossCorr, smoothnessDF, cycleLoss))
-#     print('weighted cc: %.5f smmothness: %.5f cycleLoss: %.5f' % (crossCorrWeight * crossCorr, smoothNessWeight * smoothnessDF, self.userOpts.cycleW * cycleLoss))
-    if not self.userOpts.useContext:
-      del zeroIndices
-      del cycleImgData
-      del imgDataDef
-      del deformedTmp
-      del lossCalculator
+    currDefFields[:, :, idx[0]:idx[0]+imgDataToWork.shape[2], idx[1]:idx[1]+imgDataToWork.shape[3], idx[2]:idx[2]+imgDataToWork.shape[4]][subIdxField==0] = addedField[subIdxField==0].detach()
+
+    cropStart0 = (imgDataToWork.shape[2]-defFields.shape[2])/2
+    cropStart1 = (imgDataToWork.shape[3]-defFields.shape[3])/2
+    cropStart2 = (imgDataToWork.shape[4]-defFields.shape[4])/2
+    imgDataToWork = imgDataToWork[:,:,cropStart0:cropStart0+defFields.shape[2], cropStart1:cropStart1+defFields.shape[3], cropStart2:cropStart2+defFields.shape[4]]
+    loss =  self.getCycleSmoothnessCrossCorrLoss(imgDataToWork, currDefFields, addedField, defFields, idx, itIdx)
+    
     
     torch.cuda.empty_cache()
-#     print(torch.cuda.memory_allocated() / 1048576.0) 
           
     loss.backward()
     
